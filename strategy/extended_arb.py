@@ -7,13 +7,10 @@ import time
 import traceback
 from decimal import Decimal
 
-# 修正导入路径：确保 exchanges.extended 存在
+# Correct imports
 from exchanges.extended import ExtendedClient
-
-# Lighter 客户端
 from lighter.signer_client import SignerClient
 
-# 本地模块导入
 from .data_logger import DataLogger
 from .order_book_manager import OrderBookManager
 from .websocket_manager import WebSocketManagerWrapper
@@ -50,7 +47,6 @@ class ExtendedArb:
         self.extended_api_key = os.getenv('EXTENDED_API_KEY')
         
         self.lighter_base_url = "https://mainnet.zklighter.elliot.ai"
-        # 默认值处理
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX', 0))
         self.api_key_index = int(os.getenv('LIGHTER_API_KEY_INDEX', 0))
 
@@ -63,8 +59,7 @@ class ExtendedArb:
             self.logger.addHandler(handler)
 
     def initialize_clients(self):
-        # 1. Extended Client Initialization
-        # 将配置字典传递给 ExtendedClient
+        # 1. Extended Client
         config_dict = {
             'ticker': self.ticker,
             'extended_vault': self.extended_vault,
@@ -75,11 +70,11 @@ class ExtendedArb:
         }
         self.extended_client = ExtendedClient(config_dict)
         
-        # 2. Lighter Client Initialization
+        # 2. Lighter Client
         api_key_private = os.getenv('API_KEY_PRIVATE_KEY')
         if not api_key_private:
             self.logger.error("Missing API_KEY_PRIVATE_KEY for Lighter")
-            # 在实际运行中这里可能需要 raise Exception
+            sys.exit(1)
         
         self.lighter_client = SignerClient(
             url=self.lighter_base_url,
@@ -87,19 +82,22 @@ class ExtendedArb:
             account_index=self.account_index,
             api_key_index=self.api_key_index
         )
+        # Ensure Lighter client check passes
+        if err := self.lighter_client.check_client():
+            self.logger.error(f"Lighter Client Error: {err}")
 
     async def run(self):
         self.logger.info(f"🚀 Starting Extended-Lighter Arb for {self.ticker}")
         self.initialize_clients()
         
-        # 连接 Extended 客户端 (建立 HTTP session)
         await self.extended_client.connect()
 
         try:
             # 1. Get Contract Info
             ext_contract_id, ext_tick_size = await self.extended_client.get_contract_attributes()
             
-            # Assume Lighter config fetch (simplified for demo, should be dynamic in prod)
+            # Assume Lighter config fetch (simplified)
+            # In a real scenario, use Lighter API to get market ID
             lighter_mkt_id = 1 
             lighter_base_mult = 10000 
             lighter_price_mult = 100 
@@ -109,8 +107,16 @@ class ExtendedArb:
             self.order_manager.set_extended_config(self.extended_client, ext_contract_id, ext_tick_size)
             self.order_manager.set_lighter_config(self.lighter_client, lighter_mkt_id, lighter_base_mult, lighter_price_mult, lighter_tick_size)
             
+            # Hook up WebSocket Callbacks
+            self.ws_manager.set_callbacks(
+                on_extended_order_update=self.order_manager.handle_extended_order_update,
+                on_lighter_order_filled=self._handle_lighter_fill
+            )
+            
             # 3. Setup WS
-            self.ws_manager.set_extended_config(self.ticker)
+            self.ws_manager.set_extended_config(self.ticker, self.extended_vault)
+            self.ws_manager.set_lighter_config(self.lighter_client, lighter_mkt_id, self.account_index)
+            
             await self.ws_manager.setup_extended_websocket()
             self.ws_manager.start_lighter_websocket() 
             
@@ -131,18 +137,20 @@ class ExtendedArb:
                         await asyncio.sleep(0.1)
                         continue
 
+                    # Spread Calculation
                     long_opp = (l_bid - ex_bid) > self.long_ex_threshold
                     short_opp = (ex_ask - l_ask) > self.short_ex_threshold
                     
                     if long_opp:
                         self.logger.info(f"💎 Long Opportunity: Buy Ext {ex_bid} / Sell Lighter {l_bid}")
+                        # This call waits for fill event inside order_manager
                         await self.order_manager.place_extended_post_only_order('buy', self.order_quantity, self.stop_flag)
 
                     elif short_opp:
                         self.logger.info(f"💎 Short Opportunity: Sell Ext {ex_ask} / Buy Lighter {l_ask}")
                         await self.order_manager.place_extended_post_only_order('sell', self.order_quantity, self.stop_flag)
                     
-                    # Check for Hedge Requirement (Triggered if order manager detects fill)
+                    # Hedging Logic (Executed if Extended order filled)
                     if self.order_manager.waiting_for_lighter_fill:
                         await self.order_manager.place_lighter_market_order(
                             self.order_manager.current_lighter_side,
@@ -159,4 +167,11 @@ class ExtendedArb:
                     traceback.print_exc()
                     await asyncio.sleep(1)
         finally:
-            await self.extended_client.close()
+            await self.extended_client.disconnect()
+            self.ws_manager.shutdown()
+
+    def _handle_lighter_fill(self, order):
+        self.logger.info(f"Lighter Fill Confirmed: {order}")
+
+    def stop(self):
+        self.stop_flag = True

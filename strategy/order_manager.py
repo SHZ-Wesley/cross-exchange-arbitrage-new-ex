@@ -12,12 +12,7 @@ class OrderManager:
         self.order_book_manager = order_book_manager
         self.logger = logger
         
-        # EdgeX config
-        self.edgex_client = None
-        self.edgex_contract_id = None
-        self.edgex_tick_size = None
-        
-        # Extended config (New)
+        # Extended config
         self.extended_client = None
         self.extended_contract_id = None
         self.extended_tick_size = None
@@ -33,20 +28,20 @@ class OrderManager:
         self.current_maker_order_id = None
         self.waiting_for_lighter_fill = False
         self.order_execution_complete = False
+        
+        # Hedging State
         self.current_lighter_side = None
         self.current_lighter_quantity = None
         self.current_lighter_price = None
         
         # Callbacks
         self.on_order_filled = None
+        
+        # Events
+        self.extended_fill_event = asyncio.Event()
 
     def set_callbacks(self, on_order_filled):
         self.on_order_filled = on_order_filled
-
-    def set_edgex_config(self, client, contract_id, tick_size):
-        self.edgex_client = client
-        self.edgex_contract_id = contract_id
-        self.edgex_tick_size = tick_size
 
     def set_extended_config(self, client, contract_id, tick_size):
         self.extended_client = client
@@ -67,19 +62,17 @@ class OrderManager:
         if not self.extended_client:
             raise ValueError("Extended client not configured")
 
-        # Get BBO
         best_bid, best_ask = self.order_book_manager.get_extended_bbo()
         if best_bid is None or best_ask is None:
             self.logger.warning("Extended BBO not ready")
             return False
 
-        # Determine Price (Maker)
+        # Maker Price Logic
         price = best_bid if side == 'buy' else best_ask
         
         self.logger.info(f"Creating Extended {side} order: {quantity} @ {price}")
         
         try:
-            # Note: This calls the place_open_order method in exchanges/extended.py
             result = await self.extended_client.place_open_order(
                 contract_id=self.extended_contract_id,
                 quantity=quantity,
@@ -87,40 +80,30 @@ class OrderManager:
                 price=price
             )
             
-            # Simple simulation of result handling, assuming result object has .success and .order_id
-            if hasattr(result, 'success') and not result.success:
-                self.logger.error(f"Extended order failed: {getattr(result, 'error_message', 'Unknown error')}")
+            if not result.success:
+                self.logger.error(f"Extended order failed: {result.error_message}")
                 return False
             
-            self.current_maker_order_id = getattr(result, 'order_id', 'unknown')
+            self.current_maker_order_id = result.order_id
             self.logger.info(f"Extended Order Placed ID: {self.current_maker_order_id}")
             
-            # Monitor for fill (Simplified polling for demo)
-            return await self._monitor_extended_order_fill(self.current_maker_order_id, side, quantity, stop_flag)
+            # Reset event
+            self.extended_fill_event.clear()
+            
+            # Wait for fill event or timeout
+            try:
+                await asyncio.wait_for(self.extended_fill_event.wait(), timeout=10)
+                self.logger.info("Extended Order Fill Detected via Event!")
+                return True
+            except asyncio.TimeoutError:
+                self.logger.info(f"Extended order timeout, cancelling: {self.current_maker_order_id}")
+                await self.extended_client.cancel_order(self.current_maker_order_id)
+                return False
 
         except Exception as e:
             self.logger.error(f"Error placing Extended order: {e}")
             traceback.print_exc()
             return False
-
-    async def _monitor_extended_order_fill(self, order_id, side, quantity, stop_flag):
-        """
-        Monitor Extended order status.
-        Strategy: Wait for fill -> Trigger Lighter Hedge.
-        """
-        start_time = time.time()
-        while not stop_flag:
-            if time.time() - start_time > 5: # 5s Timeout
-                self.logger.info(f"Extended order timeout, cancelling: {order_id}")
-                await self.extended_client.cancel_order(order_id)
-                return False
-
-            # NOTE: In a real system, we'd check `self.current_maker_status` updated by WS.
-            # Here we assume a fill happens if we are integrating with the real system.
-            # For now, return False unless WS logic is fully hooked up.
-            await asyncio.sleep(0.1)
-            
-        return False
 
     def handle_extended_order_update(self, order_data):
         """Handle order update from Extended WebSocket."""
@@ -128,46 +111,52 @@ class OrderManager:
         status = order_data.get('status')
         
         if oid == self.current_maker_order_id and status == 'FILLED':
-            self.logger.info("Extended Order FILLED")
+            self.logger.info(f"Extended Order {oid} FILLED")
             side = order_data.get('side')
             qty = Decimal(str(order_data.get('filled_size', 0)))
             
-            # Setup Lighter Hedge
-            self.current_lighter_side = 'sell' if side == 'buy' else 'buy'
+            # Setup Lighter Hedge Params
+            self.current_lighter_side = 'sell' if side.upper() == 'BUY' else 'buy'
             self.current_lighter_quantity = qty
             
             # Calculate aggressive taker price
             l_bid, l_ask = self.order_book_manager.get_lighter_bbo()
+            
             if self.current_lighter_side == 'buy':
+                # Buying on Lighter (Short on Maker) -> Pay Ask
                 self.current_lighter_price = l_ask * Decimal('1.05') if l_ask else None
             else:
+                # Selling on Lighter (Long on Maker) -> Sell into Bid
                 self.current_lighter_price = l_bid * Decimal('0.95') if l_bid else None
 
             self.waiting_for_lighter_fill = True
             self.order_execution_complete = False
+            
+            # Signal the main loop to proceed
+            self.extended_fill_event.set()
 
-    # --- Lighter Logic (Keep existing methods) ---
+    # --- Lighter Logic ---
     async def place_lighter_market_order(self, side, quantity, price, stop_flag):
-        # Implementation from original file...
-        pass
-    
-    # --- EdgeX Logic (Keep existing methods) ---
-    def get_edgex_client_order_id(self):
-        # Implementation...
-        pass
-        
-    def update_edgex_order_status(self, status):
-        # Implementation...
-        pass
-        
-    async def fetch_edgex_bbo_prices(self):
-        # Implementation...
-        pass
-        
-    async def place_edgex_post_only_order(self, side, quantity, stop_flag):
-        # Implementation...
-        pass
-        
-    def handle_edgex_order_update(self, order_data):
-        # Implementation...
-        pass
+        """Execute Lighter Hedge"""
+        self.logger.info(f"Placing Lighter Hedge: {side} {quantity} @ {price}")
+        if not self.lighter_client:
+            return
+
+        try:
+            # Call Lighter Place Order (implementation depends on LighterClient in exchanges/lighter.py)
+            # Assuming it supports place_limit_order or place_market_order
+            # Here we use limit order with aggressive price as market order
+            res = await self.lighter_client.place_limit_order(
+                contract_id=self.lighter_market_index,
+                quantity=quantity,
+                price=price,
+                side=side
+            )
+            
+            if res.success:
+                 self.logger.info(f"Lighter Hedge Placed: {res.order_id}")
+            else:
+                 self.logger.error(f"Lighter Hedge Failed: {res.error_message}")
+
+        except Exception as e:
+            self.logger.error(f"Lighter Hedge Exception: {e}")
