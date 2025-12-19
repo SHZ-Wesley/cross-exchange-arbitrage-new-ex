@@ -2,49 +2,58 @@ from decimal import Decimal
 import logging
 
 class OrderBookManager:
-    """
-    Manages order book data for Lighter, EdgeX, and Extended.
-    """
-    def __init__(self, logger):
-        self.logger = logger
-        
-        # Lighter state
-        self.lighter_best_bid = None
-        self.lighter_best_ask = None
-        self.lighter_order_book_ready = False
-        
-        # EdgeX state
-        self.edgex_best_bid = None
-        self.edgex_best_ask = None
-        self.edgex_order_book_ready = False
+    def __init__(self, logger=None):
+        self.extended_bbo = {"bid": None, "ask": None}
+        self.lighter_bbo = {"bid": None, "ask": None}
+        self.edgex_bbo = {"bid": None, "ask": None}
+        self.logger = logger or logging.getLogger(__name__)
 
-        # Extended state (New)
-        self.extended_best_bid = None
-        self.extended_best_ask = None
-        self.extended_order_book_ready = False
+    @property
+    def extended_order_book_ready(self):
+        return self.extended_bbo["bid"] is not None and self.extended_bbo["ask"] is not None
 
-    def update_lighter_bbo(self, best_bid: Decimal, best_ask: Decimal):
-        self.lighter_best_bid = best_bid
-        self.lighter_best_ask = best_ask
-        self.lighter_order_book_ready = True
+    @property
+    def lighter_order_book_ready(self):
+        return self.lighter_bbo["bid"] is not None and self.lighter_bbo["ask"] is not None
 
-    def update_edgex_bbo(self, best_bid: Decimal, best_ask: Decimal):
-        self.edgex_best_bid = best_bid
-        self.edgex_best_ask = best_ask
-        self.edgex_order_book_ready = True
+    @property
+    def edgex_order_book_ready(self):
+        return self.edgex_bbo["bid"] is not None and self.edgex_bbo["ask"] is not None
 
-    def update_extended_bbo(self, best_bid: Decimal, best_ask: Decimal):
-        """Update Extended BBO data."""
-        self.extended_best_bid = best_bid
-        self.extended_best_ask = best_ask
-        self.extended_order_book_ready = True
+    def _to_decimal(self, value):
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except:
+            return None
 
-    def get_lighter_bbo(self):
-        return self.lighter_best_bid, self.lighter_best_ask
+    def update_extended_bbo(self, bid, ask):
+        try:
+            self.extended_bbo["bid"] = self._to_decimal(bid)
+            self.extended_bbo["ask"] = self._to_decimal(ask)
+        except Exception:
+            pass
 
-    def get_edgex_bbo(self):
-        return self.edgex_best_bid, self.edgex_best_ask
+    def update_lighter_bbo(self, bid, ask):
+        try:
+            self.lighter_bbo["bid"] = self._to_decimal(bid)
+            self.lighter_bbo["ask"] = self._to_decimal(ask)
+        except Exception:
+            pass
+
+    def update_edgex_bbo(self, bid, ask):
+        try:
+            self.edgex_bbo["bid"] = self._to_decimal(bid)
+            self.edgex_bbo["ask"] = self._to_decimal(ask)
+        except Exception:
+            pass
 
     def get_extended_bbo(self):
-        """Get Extended Best Bid and Ask."""
-        return self.extended_best_bid, self.extended_best_ask
+        return self.extended_bbo["bid"], self.extended_bbo["ask"]
+
+    def get_lighter_bbo(self):
+        return self.lighter_bbo["bid"], self.lighter_bbo["ask"]
+
+    def get_edgex_bbo(self):
+        return self.edgex_bbo["bid"], self.edgex_bbo["ask"]
