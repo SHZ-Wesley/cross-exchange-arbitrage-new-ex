@@ -1,18 +1,19 @@
-import time
 import logging
-from decimal import Decimal
-from lighter.lighter_client import Client
+from lighter.signer_client import SignerClient
 from lighter.constants import ORDER_TYPE_LIMIT, ORDER_SIDE_BUY, ORDER_SIDE_SELL
 
+from exchanges.base import OrderResult
+
 class LighterClient:
-    def __init__(self, api_key, private_key, api_key_index, logger=None):
+    def __init__(self, api_key, private_key, api_key_index, logger=None, account_index=0):
         self.logger = logger or logging.getLogger(__name__)
         
-        # 初始化 Lighter SDK Client
-        self.client = Client(
-            api_key=api_key,
+        # 初始化 Lighter SDK SignerClient
+        self.client = SignerClient(
+            url="https://mainnet.zklighter.elliot.ai",
             private_key=private_key,
-            api_key_index=int(api_key_index)
+            account_index=int(account_index),
+            api_key_index=int(api_key_index),
         )
         self.logger.info("Lighter client initialized")
 
@@ -23,25 +24,30 @@ class LighterClient:
         try:
             l_side = ORDER_SIDE_BUY if side.lower() == 'buy' else ORDER_SIDE_SELL
             
-            # Lighter SDK 为同步调用
-            order = self.client.create_order(
-                market_id=market_id,
-                order_type=ORDER_TYPE_LIMIT,
+            order = await self.client.create_limit_order(
+                market_id=int(market_id),
                 side=l_side,
                 amount=float(size),
-                price=float(price)
+                price=float(price),
+                order_type=ORDER_TYPE_LIMIT,
             )
             self.logger.info(f"Lighter Order Placed: {order}")
-            return order
+
+            order_id = order.get('id') if isinstance(order, dict) else str(order)
+
+            return OrderResult(success=True, order_id=order_id)
         except Exception as e:
             self.logger.error(f"Lighter Place Order Error: {e}")
-            return None
+            return OrderResult(success=False, error_message=str(e))
 
     async def cancel_order(self, order_id):
         try:
-            res = self.client.cancel_order(int(order_id))
+            res = await self.client.cancel_order(int(order_id))
             self.logger.info(f"Lighter Order Cancelled: {res}")
-            return res
+            return OrderResult(success=True)
         except Exception as e:
             self.logger.error(f"Lighter Cancel Error: {e}")
-            return None
+            return OrderResult(success=False, error_message=str(e))
+
+    async def place_limit_order(self, contract_id, quantity, price, side):
+        return await self.place_order(contract_id, side, quantity, price)

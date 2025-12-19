@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import argparse
+import os
 from decimal import Decimal
 import dotenv
 
@@ -45,24 +46,42 @@ async def main():
             short_ex_threshold=Decimal(args.short_threshold)
         )
     elif args.exchange.lower() == 'extended':
+        extended_api_key = os.getenv("EXTENDED_API_KEY")
+        extended_private_key = os.getenv("EXTENDED_PRIVATE_KEY")
+        extended_vault = os.getenv("EXTENDED_VAULT")
+
+        lighter_private_key = os.getenv("API_KEY_PRIVATE_KEY")
+        lighter_api_key_index = int(os.getenv("LIGHTER_API_KEY_INDEX", 0))
+        lighter_api_key = os.getenv("LIGHTER_API_KEY", "")
+
+        if not all([extended_api_key, extended_private_key, extended_vault, lighter_private_key]):
+            print("错误: 缺少 Extended 或 Lighter 交易所的环境变量配置。请检查 .env 文件。")
+            return 1
+
         bot = ExtendedArb(
+            extended_api_key=extended_api_key,
+            extended_stark_private_key=extended_private_key,
+            extended_vault=extended_vault,
+            lighter_api_key=lighter_api_key,
+            lighter_private_key=lighter_private_key,
+            lighter_api_key_index=lighter_api_key_index,
             ticker=args.ticker.upper(),
-            order_quantity=Decimal(args.size),
+            size=args.size,
             fill_timeout=args.fill_timeout,
             max_position=args.max_position,
-            long_ex_threshold=Decimal(args.long_threshold),
-            short_ex_threshold=Decimal(args.short_threshold)
+            long_ex_threshold=args.long_threshold,
+            short_ex_threshold=args.short_threshold
         )
     else:
-        print(f"Unsupported exchange: {args.exchange}")
+        print(f"不支持的交易所: {args.exchange}")
         return 1
 
     try:
         await bot.run()
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        print("\n用户中断程序")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"发生错误: {e}")
         import traceback
         traceback.print_exc()
 
